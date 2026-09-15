@@ -13,7 +13,7 @@ export function PersistedEditableGreeting({ initialGreeting }: PersistedEditable
   const [inputValue, setInputValue] = useState(initialGreeting);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const nextGreeting = inputValue.trim();
@@ -22,9 +22,13 @@ export function PersistedEditableGreeting({ initialGreeting }: PersistedEditable
       return;
     }
 
-    const savedGreeting = saveGreeting(nextGreeting).greeting;
-    setGreeting(savedGreeting);
-    setInputValue(savedGreeting);
+    try {
+      const savedGreeting = (await saveGreeting(nextGreeting)).greeting;
+      setGreeting(savedGreeting);
+      setInputValue(savedGreeting);
+    } catch {
+      inputRef.current?.focus();
+    }
   }
 
   return (
