@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -13,8 +15,11 @@ import (
 	"time"
 
 	"github.com/ThanhNV121097/project-c5d18f08/backend/migrations"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const initialGreeting = "Hello, World!"
 
 func main() {
 	databaseURL := os.Getenv("DATABASE_URL")
@@ -43,6 +48,30 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /v1/greeting", func(w http.ResponseWriter, r *http.Request) {
+		greeting, err := readGreeting(r.Context(), pool)
+		if err != nil {
+			log.Printf("read greeting: %v", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"greeting": greeting})
+	})
+	mux.HandleFunc("PUT /v1/greeting", func(w http.ResponseWriter, r *http.Request) {
+		greeting, ok := parseGreeting(w, r)
+		if !ok {
+			return
+		}
+		if err := updateGreeting(r.Context(), pool, greeting); err != nil {
+			log.Printf("update greeting: %v", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"greeting": greeting})
+	})
+	mux.HandleFunc("/v1/greeting", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "not found")
 	})
@@ -51,47 +80,130 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
+func readGreeting(ctx context.Context, pool *pgxpool.Pool) (string, error) {
+	var greeting string
+	err := pool.QueryRow(ctx, `SELECT text FROM greetings WHERE id = 1`).Scan(&greeting)
+	if err == nil {
+		return greeting, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO greetings (id, text) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`, initialGreeting)
+	if err != nil {
+		return "", err
+	}
+	return initialGreeting, nil
+}
+
+func updateGreeting(ctx context.Context, pool *pgxpool.Pool, greeting string) error {
+	_, err := pool.Exec(ctx, `INSERT INTO greetings (id, text, updated_at) VALUES (1, $1, now()) ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text, updated_at = now()`, greeting)
+	return err
+}
+
+func parseGreeting(w http.ResponseWriter, r *http.Request) (string, bool) {
+	defer r.Body.Close()
+	var body map[string]any
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&body); err != nil {
+		writeValidationError(w)
+		return "", false
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		writeValidationError(w)
+		return "", false
+	}
+	if len(body) != 1 {
+		writeValidationError(w)
+		return "", false
+	}
+	value, ok := body["greeting"].(string)
+	if !ok {
+		writeValidationError(w)
+		return "", false
+	}
+	greeting := strings.TrimSpace(value)
+	if greeting == "" {
+		writeValidationError(w)
+		return "", false
+	}
+	return greeting, true
+}
+
+func writeValidationError(w http.ResponseWriter) {
+	writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "greeting must contain non-whitespace text")
+}
+
 func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
 		return err
 	}
 	entries, err := fs.ReadDir(migrations.Files, ".")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	var names []string
 	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".up.sql") { names = append(names, entry.Name()) }
+		if strings.HasSuffix(entry.Name(), ".up.sql") {
+			names = append(names, entry.Name())
+		}
 	}
 	sort.Strings(names)
 	for _, name := range names {
 		var applied bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = $1)`, name).Scan(&applied); err != nil { return err }
-		if applied { continue }
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = $1)`, name).Scan(&applied); err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
 		sql, err := migrations.Files.ReadFile(name)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		if strings.Contains(strings.ToUpper(string(sql)), "CREATE INDEX CONCURRENTLY") {
-			if _, err = pool.Exec(ctx, string(sql)); err != nil { return fmt.Errorf("%s: %w", name, err) }
-			if _, err = pool.Exec(ctx, `INSERT INTO schema_migrations (filename) VALUES ($1)`, name); err != nil { return err }
+			if _, err = pool.Exec(ctx, string(sql)); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			if _, err = pool.Exec(ctx, `INSERT INTO schema_migrations (filename) VALUES ($1)`, name); err != nil {
+				return err
+			}
 			continue
 		}
 		tx, err := pool.Begin(ctx)
-		if err != nil { return err }
-		if _, err = tx.Exec(ctx, string(sql)); err == nil { _, err = tx.Exec(ctx, `INSERT INTO schema_migrations (filename) VALUES ($1)`, name) }
-		if err != nil { _ = tx.Rollback(ctx); return fmt.Errorf("%s: %w", name, err) }
-		if err = tx.Commit(ctx); err != nil { return err }
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, string(sql)); err == nil {
+			_, err = tx.Exec(ctx, `INSERT INTO schema_migrations (filename) VALUES ($1)`, name)
+		}
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func port() string {
-	if value := os.Getenv("PORT"); value != "" { return value }
-	if value := os.Getenv("APP_PORT"); value != "" { return value }
+	if value := os.Getenv("PORT"); value != "" {
+		return value
+	}
+	if value := os.Getenv("APP_PORT"); value != "" {
+		return value
+	}
 	return "8080"
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil { log.Printf("write response: %v", err) }
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Printf("write response: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
