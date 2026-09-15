@@ -52,3 +52,13 @@ Unknown paths return `404 NOT_FOUND` using shared envelope. Unsupported methods 
 ## Health
 
 `GET /healthz` is runtime health only, returns `200 OK` with `{"status":"ok"}` after migration and database connectivity succeed; otherwise `503 Service Unavailable`.
+
+## Story extension — Persisted editable greeting
+
+No endpoint addition needed. Existing `GET /v1/greeting` and `PUT /v1/greeting` exactly cover show and save. Both use mock-compatible `{ "greeting": string }` JSON responses. No authentication: shared public greeting.
+
+Backend accepts browser requests through edge `/api/v1/greeting`, after proxy removes `/api`; backend mounts only `/v1/greeting`. Successful write updates `updated_at`; it is not exposed because UI renders only `greeting`.
+
+### Contract decision
+
+Mock blank saves return current `{ "greeting": string }`; rejected. `PUT` returns `400 VALIDATION_ERROR` because invalid input must be observable at API boundary and must not write. Frontend change when API replaces mock: retain current client-side trim/focus guard; if server returns `400`, retain current heading and focus input, with no visible error state. No UI response-shape change.
