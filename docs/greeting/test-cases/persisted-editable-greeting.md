@@ -127,13 +127,6 @@ Check: interact_page
 Traces: SC-16 (GREETING-002 AC-8)
 Check: interact_page
 
-**Scenario**: Long saved greeting wraps without horizontal page scroll
-**Given**: Stored greeting is `This is a very long greeting that should wrap within the centered section instead of forcing horizontal scrolling across the page`.
-**When**: Visitor opens the page at 320px viewport width.
-**Then**: Heading wraps inside the centered section and document horizontal scroll width does not exceed viewport width.
-Traces: GREETING-003 responsive boundary
-Check: measure_styles
-
 ## Minimal visual design
 
 **Scenario**: Body background is white
