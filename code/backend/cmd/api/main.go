@@ -98,4 +98,3 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]map[string]string{"error": {"code": code, "message": message}})
 }
 
-var _ = errors.New
